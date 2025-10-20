@@ -1,4 +1,4 @@
-#!/usr/bin/env node -r esm
+#!/usr/bin/env node
 
 import 'localenv';
 import optimist from 'optimist';
@@ -6,30 +6,59 @@ import optimist from 'optimist';
 import log from 'book';
 import Debug from 'debug';
 
-import CreateServer from '../server';
+import CreateServer from '../server.js';
 
 const debug = Debug('localtunnel');
 
 const argv = optimist
     .usage('Usage: $0 --port [num]')
     .options('secure', {
-        default: false,
+        default: process.env.LT_SECURE === 'true' || false,
         describe: 'use this flag to indicate proxy over https'
     })
     .options('port', {
-        default: '80',
+        default: process.env.LT_PORT || '80',
         describe: 'listen on this port for outside requests'
     })
     .options('address', {
-        default: '0.0.0.0',
+        default: process.env.LT_ADDRESS || '0.0.0.0',
         describe: 'IP address to bind to'
     })
     .options('domain', {
+        default: process.env.LT_DOMAIN,
         describe: 'Specify the base domain name. This is optional if hosting localtunnel from a regular example.com domain. This is required if hosting a localtunnel server from a subdomain (i.e. lt.example.dom where clients will be client-app.lt.example.come)',
     })
     .options('max-sockets', {
-        default: 10,
+        default: parseInt(process.env.LT_MAX_SOCKETS) || 10,
         describe: 'maximum number of tcp sockets each client is allowed to establish at one time (the tunnels)'
+    })
+    .options('admin-port', {
+        default: process.env.LT_ADMIN_PORT,
+        describe: 'port for admin API (tunnel creation and management). If not specified, admin API runs on the same port as public traffic'
+    })
+    .options('admin-address', {
+        default: process.env.LT_ADMIN_ADDRESS || '0.0.0.0',
+        describe: 'IP address for admin server to bind to'
+    })
+    .options('port-range-start', {
+        default: parseInt(process.env.LT_PORT_RANGE_START),
+        describe: 'starting port for client TCP connections range (e.g., 10000)'
+    })
+    .options('port-range-end', {
+        default: parseInt(process.env.LT_PORT_RANGE_END),
+        describe: 'ending port for client TCP connections range (e.g., 10100)'
+    })
+    .options('landing', {
+        default: process.env.LT_LANDING,
+        describe: 'landing page URL for root requests'
+    })
+    .options('http-proxy-port', {
+        default: parseInt(process.env.LT_HTTP_PROXY_PORT),
+        describe: 'public proxy port for HTTP traffic (used in generated tunnel URLs, defaults to LT_PORT if not set)'
+    })
+    .options('https-proxy-port', {
+        default: parseInt(process.env.LT_HTTPS_PROXY_PORT),
+        describe: 'public proxy port for HTTPS traffic (used in generated tunnel URLs, defaults to LT_PORT if not set)'
     })
     .argv;
 
@@ -38,15 +67,33 @@ if (argv.help) {
     process.exit();
 }
 
-const server = CreateServer({
+const { server, adminServer } = CreateServer({
     max_tcp_sockets: argv['max-sockets'],
     secure: argv.secure,
     domain: argv.domain,
+    portRangeStart: argv['port-range-start'],
+    portRangeEnd: argv['port-range-end'],
+    landing: argv.landing,
+    httpProxyPort: argv['http-proxy-port'],
+    httpsProxyPort: argv['https-proxy-port'],
+    port: argv.port,
 });
 
+// Start main public server (tunnel traffic)
 server.listen(argv.port, argv.address, () => {
-    debug('server listening on port: %d', server.address().port);
+    debug('public server listening on port: %d', server.address().port);
 });
+
+// Start admin server if separate port is specified
+if (argv['admin-port']) {
+    adminServer.listen(argv['admin-port'], argv['admin-address'], () => {
+        debug('admin server listening on port: %d', adminServer.address().port);
+    });
+} else {
+    // If no separate admin port, merge admin routes into main server
+    // This is handled by keeping backward compatibility
+    debug('admin API running on same port as public server');
+}
 
 process.on('SIGINT', () => {
     process.exit();

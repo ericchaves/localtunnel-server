@@ -1,0 +1,41 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Launch Server",
+      "runtimeExecutable": "${env:HOME}/.nvm/nvm-exec",
+      "runtimeArgs": ["node"],
+      "program": "${workspaceFolder}/bin/server",
+      "args": ["--port", "3000"],
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen",
+      "skipFiles": ["<node_internals>/**"]
+    },
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Run Tests",
+      "runtimeExecutable": "${env:HOME}/.nvm/nvm-exec",
+      "runtimeArgs": ["node"],
+      "program": "${workspaceFolder}/node_modules/.bin/mocha",
+      "args": ["--check-leaks", "./**/*.test.js"],
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen",
+      "skipFiles": ["<node_internals>/**"]
+    },
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Run Current Test File",
+      "runtimeExecutable": "${env:HOME}/.nvm/nvm-exec",
+      "runtimeArgs": ["node"],
+      "program": "${workspaceFolder}/node_modules/.bin/mocha",
+      "args": ["--check-leaks", "${file}"],
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen",
+      "skipFiles": ["<node_internals>/**"]
+    }
+  ]
+}

@@ -2,32 +2,36 @@
   "author": "Roman Shtylman <shtylman@gmail.com>",
   "name": "localtunnel-server",
   "description": "expose localhost to the world",
-  "version": "0.0.8",
+  "version": "0.0.8-epc",
   "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=25.0.0",
+    "npm": ">=11.0.0"
+  },
+  "packageManager": "yarn@1.22.22",
   "repository": {
     "type": "git",
     "url": "git://github.com/localtunnel/server.git"
   },
   "dependencies": {
-    "book": "1.3.3",
-    "debug": "3.1.0",
-    "esm": "3.0.34",
-    "human-readable-ids": "1.0.3",
-    "koa": "2.5.1",
-    "koa-router": "7.4.0",
-    "localenv": "0.2.2",
-    "optimist": "0.6.1",
-    "pump": "3.0.0",
-    "tldjs": "2.3.1"
+    "book": "^1.3.3",
+    "debug": "^4.3.7",
+    "human-readable-ids": "^1.0.4",
+    "koa": "^2.15.3",
+    "koa-router": "^13.0.0",
+    "localenv": "^0.2.2",
+    "optimist": "^0.6.1",
+    "pump": "^3.0.2",
+    "tldjs": "^2.3.1"
   },
   "devDependencies": {
-    "mocha": "5.1.1",
-    "node-dev": "3.1.3",
-    "supertest": "3.1.0",
-    "ws": "5.1.1"
+    "mocha": "^11.0.1",
+    "node-dev": "^8.0.0",
+    "ws": "^8.18.0"
   },
   "scripts": {
-    "test": "mocha --check-leaks --require esm './**/*.test.js'",
+    "test": "LT_MAX_GRACE_PERIOD=10000 LT_GRACE_PERIOD=100 mocha --check-leaks './**/*.test.js'",
     "start": "./bin/server",
     "dev": "node-dev bin/server --port 3000"
   }

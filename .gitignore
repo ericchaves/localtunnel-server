@@ -1,1 +1,43 @@
-node_modules
+*.cfn.yml
+
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# Testing
+coverage/
+.nyc_output/
+
+# Build outputs
+dist/
+build/
+
+# Claude Code
+.claude/
+
+# OS
+Thumbs.db
+
+# temporary markdown files
+__*.md
+
+localtunnel/

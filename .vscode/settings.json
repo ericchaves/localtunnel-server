@@ -1,0 +1,22 @@
+{
+  "npm.packageManager": "yarn",
+  "eslint.packageManager": "yarn",
+  
+  "terminal.integrated.profiles.linux": {
+    "bash (nvm)": {
+      "path": "bash",
+      "args": ["-c", "source ~/.nvm/nvm.sh && nvm use && exec bash"]
+    }
+  },
+  "terminal.integrated.defaultProfile.linux": "bash (nvm)",
+
+  "files.exclude": {
+    "**/node_modules": true,
+    "**/.git": true
+  },
+
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/yarn.lock": true
+  }
+}
