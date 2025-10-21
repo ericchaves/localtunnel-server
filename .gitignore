@@ -1,4 +1,3 @@
-*.cfn.yml
 
 # Dependencies
 node_modules/
@@ -40,4 +39,5 @@ Thumbs.db
 # temporary markdown files
 __*.md
 
-localtunnel/
+# temporary cfn templates
+__*.cfn.yml

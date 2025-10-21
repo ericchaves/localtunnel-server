@@ -2,7 +2,7 @@
   "author": "Roman Shtylman <shtylman@gmail.com>",
   "name": "localtunnel-server",
   "description": "expose localhost to the world",
-  "version": "0.0.8-epc",
+  "version": "0.0.10-epc",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -10,6 +10,9 @@
     "npm": ">=11.0.0"
   },
   "packageManager": "yarn@1.22.22",
+  "bin": {
+    "lt-server": "./bin/server"
+  },
   "repository": {
     "type": "git",
     "url": "git://github.com/localtunnel/server.git"
@@ -21,7 +24,7 @@
     "koa": "^2.15.3",
     "koa-router": "^13.0.0",
     "localenv": "^0.2.2",
-    "optimist": "^0.6.1",
+    "minimist": "^1.2.8",
     "pump": "^3.0.2",
     "tldjs": "^2.3.1"
   },
@@ -31,7 +34,7 @@
     "ws": "^8.18.0"
   },
   "scripts": {
-    "test": "LT_MAX_GRACE_PERIOD=10000 LT_GRACE_PERIOD=100 mocha --check-leaks './**/*.test.js'",
+    "test": "LT_MAX_GRACE_PERIOD=10000 LT_GRACE_PERIOD=100 mocha --exit --check-leaks './**/*.test.js'",
     "start": "./bin/server",
     "dev": "node-dev bin/server --port 3000"
   }

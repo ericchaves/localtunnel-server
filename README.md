@@ -131,6 +131,8 @@ This feature allows clients to:
 | `LT_MAX_GRACE_PERIOD` | 300000 (5min) | Maximum allowed grace period |
 | `LT_IP_VALIDATION_STRICT` | false | If true, returns 409 error on IP mismatch; if false, assigns random subdomain silently |
 | `LT_TRUST_PROXY` | false | If true, uses X-Forwarded-For header for IP detection (use behind reverse proxy) |
+| `LT_REQUEST_TIMEOUT` | 5000 (5s) | Timeout (ms) for HTTP requests when waiting for tunnel sockets |
+| `LT_WEBSOCKET_TIMEOUT` | 10000 (10s) | Timeout (ms) for WebSocket upgrades when waiting for tunnel reconnection |
 
 #### Behavior Examples
 
@@ -201,6 +203,357 @@ This feature is **fully compatible** with the official localtunnel client:
 - Automatic TCP socket reconnection works seamlessly
 - HTTP reconnection (new tunnel request) preserves subdomain
 - No client-side changes required
+
+### Client Token Authentication
+
+**New in Protocol v0.0.9-epc**: Clients can now use a token-based identifier instead of IP address for subdomain reservation.
+
+#### Why Use Token Authentication?
+
+Token-based identification solves several problems:
+- **Dynamic IPs**: Clients with changing IPs (mobile, cloud containers) can maintain subdomains
+- **NAT/Proxy**: Multiple clients behind same NAT/proxy can have unique identifiers
+- **Predictable reconnection**: Same token always gets same subdomain during grace period
+- **Cloud environments**: Kubernetes pods, serverless functions with ephemeral IPs
+
+#### How to Use
+
+Clients send the `X-LT-Client-Token` header when creating a tunnel:
+
+```bash
+# Example with curl
+curl -H "X-LT-Client-Token: my-unique-token-123" \
+  https://tunnel.example.com:8080/my-subdomain
+
+# Example with custom client implementation
+const headers = {
+  'X-LT-Client-Token': 'my-unique-token-123'
+};
+```
+
+#### Token Format
+
+- **Characters**: Alphanumeric, hyphens, underscores only (`a-zA-Z0-9_-`)
+- **Length**: 1-256 characters
+- **Case-sensitive**: `Token-1` ≠ `token-1`
+- **Examples**:
+  - ✅ Valid: `my-token-123`, `user_abc`, `TOKEN-xyz`
+  - ❌ Invalid: `token with spaces`, `token@email`, `token#special`
+
+#### Behavior
+
+| Scenario | Token Provided? | IP Match? | Result |
+|----------|----------------|-----------|---------|
+| New tunnel | No | N/A | Uses IP (legacy behavior) |
+| New tunnel | Yes | N/A | Uses token as identifier |
+| Reconnect | No | Yes | Allowed (IP match) |
+| Reconnect | No | No | Blocked (IP mismatch) |
+| **Reconnect** | **Yes** | **Any** | **Allowed if token matches** |
+
+#### Examples
+
+**Example 1: Token allows IP change**
+```bash
+# Client creates tunnel from IP 1.2.3.4
+$ curl -H "X-LT-Client-Token: my-app-token" https://tunnel.me:8080/myapp
+{"id":"myapp","port":10000,...}
+
+# Client disconnects, IP changes to 5.6.7.8
+
+# Reconnect with same token (different IP) - works!
+$ curl -H "X-LT-Client-Token: my-app-token" https://tunnel.me:8080/myapp
+{"id":"myapp","port":10001,...}  # ✅ Same subdomain!
+```
+
+**Example 2: Different token blocked**
+```bash
+# Client A with token1
+$ curl -H "X-LT-Client-Token: token-a" https://tunnel.me:8080/shared
+{"id":"shared",...}
+
+# Client A disconnects (grace period active)
+
+# Client B tries with different token
+$ curl -H "X-LT-Client-Token: token-b" https://tunnel.me:8080/shared
+# Strict mode: 409 error
+# Silent mode: Gets random subdomain (e.g., "clever-fox-42")
+```
+
+**Example 3: Backward compatibility**
+```bash
+# Old clients without token still work
+$ curl https://tunnel.me:8080/oldapp
+{"id":"oldapp",...}  # Uses IP-based identification
+```
+
+#### Configuration
+
+No server configuration needed! Token support is:
+- ✅ **Always enabled**
+- ✅ **Fully backward compatible**
+- ✅ **Optional for clients**
+
+Existing environment variables still apply:
+- `LT_GRACE_PERIOD`: Works with both IP and token identification
+- `LT_IP_VALIDATION_STRICT`: Now also validates token mismatches
+- `LT_TRUST_PROXY`: Still used when token is not provided
+
+#### Security Considerations
+
+⚠️ **Important**: Client tokens are NOT authentication or encryption!
+
+- Tokens are sent in **plain text** in HTTP headers
+- Anyone with the token can "steal" the subdomain during grace period
+- Use HTTPS (`--secure true`) to protect tokens in transit
+- Tokens are for **session identification**, not security
+- For production: Use firewall rules to restrict admin API access (see Security Features)
+
+#### Client Implementation
+
+For client developers, add token support:
+
+```javascript
+// Example client implementation
+const tunnelRequest = {
+  method: 'GET',
+  path: '/my-subdomain',
+  headers: {
+    'X-LT-Client-Token': generateClientToken() // Your token logic
+  }
+};
+```
+
+See [client.spec.reference.js](./client.spec.reference.js) for full protocol specification and test examples.
+
+### HMAC Authentication
+
+**New in Protocol v0.0.10-epc**: Optional HMAC-SHA256 authentication for tunnel creation to prevent unauthorized tunnel creation.
+
+#### Why Use HMAC Authentication?
+
+HMAC authentication provides cryptographic security for tunnel creation:
+- **Prevent unauthorized tunnels**: Only clients with the shared secret can create tunnels
+- **Replay attack protection**: Nonce-based validation prevents reuse of captured requests
+- **Timestamp validation**: Requests must be recent (configurable tolerance window)
+- **No plaintext passwords**: Shared secret is never transmitted, only HMAC signatures
+- **Production security**: Essential for public-facing localtunnel servers
+
+#### Configuration
+
+Enable HMAC authentication by setting the shared secret:
+
+```bash
+# Method 1: Environment variable
+export LT_HMAC_SECRET="your-shared-secret-at-least-32-characters-long"
+bin/server
+
+# Method 2: Docker secret file
+export FILE_LT_HMAC_SECRET="/run/secrets/hmac_secret"
+bin/server
+
+# Optional: Configure tolerances
+export LT_HMAC_TIMESTAMP_TOLERANCE=60      # Seconds (default: 60)
+export LT_HMAC_NONCE_THRESHOLD=3600        # Seconds (default: 3600)
+export LT_HMAC_NONCE_CACHE_TTL=7200        # Seconds (default: 7200)
+```
+
+| Environment Variable | Default | Description |
+|---------------------|---------|-------------|
+| `LT_HMAC_SECRET` | - | Shared secret for HMAC (min 32 chars, required to enable HMAC) |
+| `FILE_LT_HMAC_SECRET` | - | Path to file containing secret (Docker secrets, Kubernetes) |
+| `LT_HMAC_TIMESTAMP_TOLERANCE` | 60 | Max age of timestamp in seconds (handles clock skew) |
+| `LT_HMAC_NONCE_THRESHOLD` | 3600 | Max age of nonce in seconds (prevents old nonce reuse) |
+| `LT_HMAC_NONCE_CACHE_TTL` | 7200 | How long to cache used nonces (should be ≥ threshold) |
+
+**Note**: When `LT_HMAC_SECRET` or `FILE_LT_HMAC_SECRET` is set, HMAC authentication becomes **required** for all tunnel creation requests.
+
+#### Protocol
+
+Clients must send three headers with tunnel creation requests:
+
+```
+Authorization: HMAC sha256=<hex_signature>
+X-Timestamp: <unix_seconds>
+X-Nonce: <unix_milliseconds>
+```
+
+**Signature Calculation:**
+```
+message = METHOD + PATH + TIMESTAMP + NONCE + BODY
+signature = HMAC-SHA256(secret, message)
+```
+
+**Example:**
+```javascript
+const crypto = require('crypto');
+const secret = 'my-shared-secret-at-least-32-characters-long';
+
+// Request details
+const method = 'GET';
+const path = '/my-subdomain';
+const timestamp = Math.floor(Date.now() / 1000).toString();  // Unix seconds
+const nonce = Date.now().toString();  // Unix milliseconds
+const body = '';  // Empty for GET requests
+
+// Build message and calculate HMAC
+const message = `${method}${path}${timestamp}${nonce}${body}`;
+const signature = crypto.createHmac('sha256', secret).update(message).digest('hex');
+
+// Send request
+const headers = {
+  'Authorization': `HMAC sha256=${signature}`,
+  'X-Timestamp': timestamp,
+  'X-Nonce': nonce
+};
+```
+
+#### Examples
+
+**Example 1: Basic HMAC Request**
+```bash
+# Shell script for HMAC authenticated tunnel creation
+SECRET="my-shared-secret-at-least-32-characters-long"
+METHOD="GET"
+PATH="/my-app"
+TIMESTAMP=$(date +%s)
+NONCE=$(date +%s%3N)  # Milliseconds
+BODY=""
+
+MESSAGE="${METHOD}${PATH}${TIMESTAMP}${NONCE}${BODY}"
+SIGNATURE=$(echo -n "$MESSAGE" | openssl dgst -sha256 -hmac "$SECRET" | cut -d' ' -f2)
+
+curl -H "Authorization: HMAC sha256=$SIGNATURE" \
+     -H "X-Timestamp: $TIMESTAMP" \
+     -H "X-Nonce: $NONCE" \
+     https://tunnel.example.com:8080/my-app
+```
+
+**Example 2: Client Implementation**
+```javascript
+// Example client with HMAC support
+class SecureLocaltunnelClient {
+  constructor(options) {
+    this.hmacSecret = options.hmacSecret;
+    // ... other options
+  }
+
+  calculateHmac(method, path, timestamp, nonce, body = '') {
+    const message = `${method}${path}${timestamp}${nonce}${body}`;
+    return crypto.createHmac('sha256', this.hmacSecret)
+                 .update(message)
+                 .digest('hex');
+  }
+
+  async createTunnel(subdomain) {
+    const method = 'GET';
+    const path = `/${subdomain}`;
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const nonce = Date.now().toString();
+    const signature = this.calculateHmac(method, path, timestamp, nonce);
+
+    const response = await fetch(`https://tunnel.example.com/${subdomain}`, {
+      headers: {
+        'Authorization': `HMAC sha256=${signature}`,
+        'X-Timestamp': timestamp,
+        'X-Nonce': nonce
+      }
+    });
+
+    return await response.json();
+  }
+}
+```
+
+#### Validation Rules
+
+1. **Timestamp Validation**
+   - Must be within `LT_HMAC_TIMESTAMP_TOLERANCE` seconds of server time
+   - Handles clock skew between client and server
+   - Prevents replay attacks with old timestamps
+
+2. **Nonce Validation**
+   - Must be numeric (Unix epoch in milliseconds)
+   - Cannot be older than `timestamp - LT_HMAC_NONCE_THRESHOLD`
+   - Cannot be reused (cached for `LT_HMAC_NONCE_CACHE_TTL` seconds)
+   - Prevents replay attacks
+
+3. **Signature Validation**
+   - Uses timing-safe comparison to prevent timing attacks
+   - Message format: `METHOD` + `PATH` + `TIMESTAMP` + `NONCE` + `BODY`
+   - Must match server-calculated signature
+
+#### Error Responses
+
+```bash
+# Missing headers
+HTTP/1.1 401 Unauthorized
+{"message": "Missing Authorization header"}
+
+# Invalid signature
+HTTP/1.1 401 Unauthorized
+{"message": "Invalid HMAC signature"}
+
+# Expired timestamp
+HTTP/1.1 401 Unauthorized
+{"message": "Timestamp expired (diff: 120s, tolerance: 60s)"}
+
+# Replay attack (nonce reused)
+HTTP/1.1 401 Unauthorized
+{"message": "Nonce already used (replay attack detected)"}
+```
+
+#### Security Best Practices
+
+1. **Generate Strong Secrets**
+   ```bash
+   # Generate a random 64-character secret
+   openssl rand -hex 32
+   ```
+
+2. **Protect the Secret**
+   - Never commit secrets to version control
+   - Use Docker secrets, Kubernetes secrets, or environment variables
+   - Rotate secrets periodically
+
+3. **Use HTTPS**
+   - Always use `--secure true` with HMAC authentication
+   - Prevents network eavesdropping
+   - Protects other headers (tokens, etc.)
+
+4. **Configure Appropriate Tolerances**
+   ```bash
+   # Strict configuration (for secure networks)
+   LT_HMAC_TIMESTAMP_TOLERANCE=30      # 30 seconds
+   LT_HMAC_NONCE_THRESHOLD=1800        # 30 minutes
+
+   # Relaxed configuration (for clients with clock skew)
+   LT_HMAC_TIMESTAMP_TOLERANCE=300     # 5 minutes
+   LT_HMAC_NONCE_THRESHOLD=7200        # 2 hours
+   ```
+
+#### Compatibility
+
+- **Backward compatible**: HMAC is optional; servers without `LT_HMAC_SECRET` work normally
+- **Client support**: Requires client implementation (see `client.spec.reference.js`)
+- **Status endpoint**: `/api/status` is always accessible without authentication
+
+#### Docker Deployment with HMAC
+
+```bash
+# Using Docker secrets
+echo "your-hmac-secret-at-least-32-chars" | docker secret create hmac_secret -
+
+docker service create \
+  --name localtunnel \
+  --secret hmac_secret \
+  -e FILE_LT_HMAC_SECRET=/run/secrets/hmac_secret \
+  -e LT_DOMAIN=tunnel.example.com \
+  -e LT_SECURE=true \
+  -p 443:443 \
+  ghcr.io/your-user/localtunnel-server:latest
+```
+
+See [client.spec.reference.js](./client.spec.reference.js) for complete HMAC protocol specification and test examples.
 
 ### Reverse Proxy Configuration
 

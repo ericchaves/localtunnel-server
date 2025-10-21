@@ -1,0 +1,793 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'EC2 instance running Localtunnel Server and Traefik with Docker - DNS-01 Challenge for Wildcard SSL with Client IP Control'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Network Configuration"
+        Parameters:
+          - VpcId
+          - SubnetId
+      - Label:
+          default: "DNS Configuration"
+        Parameters:
+          - HostedZoneId
+          - DomainName
+          - ServiceName
+      - Label:
+          default: "Instance Configuration"
+        Parameters:
+          - InstanceType
+          - CreateInstance
+      - Label:
+          default: "Service Configuration"
+        Parameters:
+          - LocaltunnelPort
+          - AdminPort
+          - SecureTraffic
+          - PortRangeStart
+          - PortRangeEnd
+          - MaxSockets
+          - GracePeriod
+          - MaxGracePeriod
+          - IPValidationStrict
+          - TrustProxy
+          - RequestTimeout
+          - WebSocketTimeout
+          - RetryAfter
+          - SocketCheckInterval
+          - LocaltunnelImageTag
+          - AdminEmail
+          - LetsEncryptEnvironment
+      - Label:
+          default: "Security Configuration"
+        Parameters:
+          - HmacSecret
+          - HmacTimestampTolerance
+          - HmacNonceThreshold
+          - HmacNonceCacheTTL
+          - NonceCleanupInterval
+    ParameterLabels:
+      VpcId:
+        default: "VPC ID"
+      SubnetId:
+        default: "Public Subnet ID"
+      HostedZoneId:
+        default: "Route53 Hosted Zone ID"
+      DomainName:
+        default: "Base Domain Name"
+      ServiceName:
+        default: "Service Name (Subdomain)"
+      InstanceType:
+        default: "EC2 Instance Type"
+      CreateInstance:
+        default: "Create EC2 Instance"
+      LocaltunnelPort:
+        default: "Localtunnel Server Port"
+      AdminPort:
+        default: "Admin API Port"
+      PortRangeStart:
+        default: "Client Port Range Start"
+      PortRangeEnd:
+        default: "Client Port Range End"
+      MaxSockets:
+        default: "Maximum Sockets per Client"
+      GracePeriod:
+        default: "Tunnel Grace Period (ms)"
+      MaxGracePeriod:
+        default: "Maximum Grace Period (ms)"
+      IPValidationStrict:
+        default: "Strict IP Validation Mode"
+      TrustProxy:
+        default: "Trust Proxy Headers"
+      RequestTimeout:
+        default: "HTTP Request Timeout (ms)"
+      WebSocketTimeout:
+        default: "WebSocket Upgrade Timeout (ms)"
+      LocaltunnelImageTag:
+        default: "Localtunnel Docker Image Tag"
+      RetryAfter:
+        default: "Retry-After Header (seconds)"
+      SocketCheckInterval:
+        default: "Socket Check Interval (ms)"
+      AdminEmail:
+        default: "Admin Email for SSL Certificates"
+      LetsEncryptEnvironment:
+        default: "Lets Encrypt Environment"
+      SecureTraffic:
+        default: "Secure Traffic with reverse proxy"
+      HmacSecret:
+        default: "HMAC Shared Secret (optional)"
+      HmacTimestampTolerance:
+        default: "HMAC Timestamp Tolerance (seconds)"
+      HmacNonceThreshold:
+        default: "HMAC Nonce Threshold (seconds)"
+      HmacNonceCacheTTL:
+        default: "HMAC Nonce Cache TTL (seconds)"
+      NonceCleanupInterval:
+        default: "Nonce Cleanup Interval (ms)"
+
+Conditions:
+  ShouldCreateInstance: !Equals [!Ref CreateInstance, "true"]
+  IsSecureTraffic: !Equals [!Ref SecureTraffic, 'true']
+  LetsEncryptEnvironmentIsProduction: !Equals [!Ref LetsEncryptEnvironment, 'production']
+  HmacEnabled: !Not [!Equals [!Ref HmacSecret, ""]]
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID where the instance will be created
+  
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Public subnet ID for the EC2 instance
+  
+  InstanceType:
+    Type: String
+    Default: t3.medium
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+      - t3.large
+      - t3.xlarge
+    Description: EC2 instance type
+  
+  CreateInstance:
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Whether to create the EC2 instance and related resources
+    ConstraintDescription: Must be either true or false
+
+  LocaltunnelPort:
+    Type: Number
+    Default: 3000
+    MinValue: 1024
+    MaxValue: 65535
+    Description: Port for Localtunnel server to listen on
+
+  AdminPort:
+    Type: Number
+    Default: 9000
+    MinValue: 1024
+    MaxValue: 65535
+    Description: Port for Admin API to manage tunnels (restricted by Security Group)
+    ConstraintDescription: Must be a valid port number between 1024-65535
+
+  PortRangeStart:
+    Type: Number
+    Default: 10000
+    MinValue: 1024
+    MaxValue: 65535
+    Description: Start of TCP port range for client tunnel connections
+    ConstraintDescription: Must be a valid port number between 1024-65535
+
+  PortRangeEnd:
+    Type: Number
+    Default: 10100
+    MinValue: 1024
+    MaxValue: 65535
+    Description: End of TCP port range for client tunnel connections
+    ConstraintDescription: Must be a valid port number between 1024-65535
+
+  MaxSockets:
+    Type: Number
+    Default: 10
+    MinValue: 1
+    MaxValue: 100
+    Description: Maximum number of TCP sockets/connections per client tunnel (default 10)
+    ConstraintDescription: Must be a number between 1 and 100
+
+  GracePeriod:
+    Type: Number
+    Default: 60000
+    MinValue: 0
+    MaxValue: 300000
+    Description: Grace period in milliseconds before removing disconnected tunnels (0 = immediate removal, max = 300000). Leave 0 for domestic/development use.
+    ConstraintDescription: Must be a number between 0 and 300000
+
+  MaxGracePeriod:
+    Type: Number
+    Default: 300000
+    MinValue: 1000
+    MaxValue: 600000
+    Description: Maximum allowed grace period in milliseconds (max 10 minutes)
+    ConstraintDescription: Must be a number between 1000 and 600000
+
+  IPValidationStrict:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Enable strict IP validation mode (returns 409 error on IP mismatch) or silent mode (assigns random subdomain)
+    ConstraintDescription: Must be either 'true' or 'false'
+
+  TrustProxy:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Trust X-Forwarded-For headers when behind reverse proxy (set to 'true' when using Traefik or similar)
+    ConstraintDescription: Must be either 'true' or 'false'
+
+  RequestTimeout:
+    Type: Number
+    Default: 5000
+    MinValue: 1000
+    MaxValue: 30000
+    Description: Timeout in milliseconds for HTTP requests when waiting for tunnel sockets
+    ConstraintDescription: Must be a number between 1000 and 30000
+
+  WebSocketTimeout:
+    Type: Number
+    Default: 10000
+    MinValue: 1000
+    MaxValue: 60000
+    Description: Timeout in milliseconds for WebSocket upgrades when waiting for tunnel reconnection
+    ConstraintDescription: Must be a number between 1000 and 60000
+
+  LocaltunnelImageTag:
+    Type: String
+    Default: latest
+    Description: Docker image tag for localtunnel-server (e.g., latest, 0.0.10-epc.2, v1.2.3)
+    AllowedPattern: ^[a-zA-Z0-9._-]+$
+    ConstraintDescription: Must be a valid Docker tag (alphanumeric, dots, hyphens, underscores)
+
+  RetryAfter:
+    Type: Number
+    Default: 5
+    MinValue: 1
+    MaxValue: 60
+    Description: Retry-After header value in seconds for 503 responses
+    ConstraintDescription: Must be a number between 1 and 60
+
+  SocketCheckInterval:
+    Type: Number
+    Default: 100
+    MinValue: 10
+    MaxValue: 1000
+    Description: Socket availability check interval in milliseconds (lower = faster response, higher CPU)
+    ConstraintDescription: Must be a number between 10 and 1000
+
+  NonceCleanupInterval:
+    Type: Number
+    Default: 60000
+    MinValue: 10000
+    MaxValue: 300000
+    Description: Nonce cache cleanup interval in milliseconds (applies when HMAC is enabled)
+    ConstraintDescription: Must be a number between 10000 and 300000
+
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+    Default: ""
+    Description: Route53 Hosted Zone ID for DNS record creation and DNS-01 challenge
+  
+  DomainName:
+    Type: String
+    Default: ""
+    Description: Base domain name (e.g., example.com)
+    AllowedPattern: ^[a-zA-Z0-9][a-zA-Z0-9-]{1,61}[a-zA-Z0-9]\.[a-zA-Z]{2,}$
+    ConstraintDescription: Must be a valid domain name
+  
+  ServiceName:
+    Type: String
+    Default: lt
+    Description: Service name to use as subdomain (e.g., 'lt' will create lt.example.com)
+    AllowedPattern: ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$
+    ConstraintDescription: Must be a valid DNS subdomain (lowercase alphanumeric and hyphens)
+  
+  AdminEmail:
+    Type: String
+    Default: ""
+    AllowedPattern: ^[^@]+@[^@]+\.[^@]+$
+    Description: Email address for Lets Encrypt certificate requests
+    ConstraintDescription: Must be a valid email address
+  
+  LetsEncryptEnvironment:
+    Type: String
+    Default: staging
+    AllowedValues:
+      - staging
+      - production
+    Description: Lets Encrypt environment (staging for testing, production for real certificates)
+    ConstraintDescription: Must be either staging or production (check https://letsencrypt.org/docs/rate-limits/ for production)
+
+  SecureTraffic:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Enable HTTPS/SSL for tunnel traffic (true) or use HTTP only (false)
+
+  HmacSecret:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: HMAC-SHA256 shared secret for authentication (min 32 characters, leave empty to disable HMAC auth)
+    AllowedPattern: ^$|^.{32,}$
+    ConstraintDescription: Must be empty or at least 32 characters long
+
+  HmacTimestampTolerance:
+    Type: Number
+    Default: 60
+    MinValue: 10
+    MaxValue: 600
+    Description: Timestamp tolerance in seconds to handle clock skew between client and server
+    ConstraintDescription: Must be a number between 10 and 600
+
+  HmacNonceThreshold:
+    Type: Number
+    Default: 3600
+    MinValue: 300
+    MaxValue: 86400
+    Description: Maximum age of nonce in seconds (prevents replay attacks with old nonces)
+    ConstraintDescription: Must be a number between 300 and 86400
+
+  HmacNonceCacheTTL:
+    Type: Number
+    Default: 7200
+    MinValue: 600
+    MaxValue: 172800
+    Description: How long to cache used nonces in seconds (should be >= nonce threshold)
+    ConstraintDescription: Must be a number between 600 and 172800
+
+Resources:
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${AWS::StackName}-web-sg'
+      GroupDescription: Security group for public HTTP/HTTPS traffic (wildcard subdomains only)
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP traffic for public wildcard subdomains
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS traffic for public wildcard subdomains
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-web-sg'
+
+  LocaltunnelClientSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${AWS::StackName}-lt-client-sg'
+      GroupDescription: Security group for Admin API and client port range - Update IPs manually after deployment
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-lt-client-sg'
+
+  TraefikDashboardIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref LocaltunnelClientSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      CidrIp: 127.0.0.1/32
+      Description: Traefik dashboard access port 8080 (HTTP in staging via IP, HTTPS in production via domain) - Update this IP manually
+
+
+  AdminApiIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref LocaltunnelClientSecurityGroup
+      IpProtocol: tcp
+      FromPort: !Ref AdminPort
+      ToPort: !Ref AdminPort
+      CidrIp: 127.0.0.1/32
+      Description: Admin API access (HTTPS) - Update this IP manually
+
+  ClientPortRangeIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref LocaltunnelClientSecurityGroup
+      IpProtocol: tcp
+      FromPort: !Ref PortRangeStart
+      ToPort: !Ref PortRangeEnd
+      CidrIp: 127.0.0.1/32
+      Description: Client tunnel connection port range - Update this IP manually
+
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: Route53DNSChallenge
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - route53:GetChange
+                  - route53:ListHostedZones
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - route53:ChangeResourceRecordSets
+                  - route53:ListResourceRecordSets
+                Resource: !Sub 'arn:aws:route53:::hostedzone/${HostedZoneId}'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-ec2-role'
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2Role
+
+  LocaltunnelInstance:
+    Type: AWS::EC2::Instance
+    Condition: ShouldCreateInstance
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT20M
+    Properties:
+      ImageId: !Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref SubnetId
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SecurityGroupIds:
+        - !Ref WebSecurityGroup
+        - !Ref LocaltunnelClientSecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          exec > >(tee /var/log/user-data.log) 2>&1
+
+          # Install dependencies
+          dnf install -y python3-pip
+          pip3 install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz
+          dnf clean all && dnf update -y && dnf install -y docker
+          systemctl start docker && systemctl enable docker
+          usermod -a -G docker ec2-user
+
+          # Install Docker Compose
+          curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+          chmod +x /usr/local/bin/docker-compose
+
+          # Set variables
+          set +e
+          CUSTOM_DOMAIN="${ServiceName}.${DomainName}"
+          [ "${LetsEncryptEnvironment}" = "production" ] && ACME_SERVER="https://acme-v02.api.letsencrypt.org/directory" || ACME_SERVER="https://acme-staging-v02.api.letsencrypt.org/directory"
+          [ "${LetsEncryptEnvironment}" = "production" ] && API_INSECURE=false || API_INSECURE=true
+
+          # Create docker-compose.yml
+          mkdir -p /opt/localtunnel && cd /opt/localtunnel
+          cat > docker-compose.yml << 'COMPOSE_EOF'
+          services:
+            traefik:
+              image: traefik:v3.5.3
+              container_name: traefik
+              restart: unless-stopped
+              networks:
+                - localtunnel_net
+              command:
+                - "--api.insecure=API_INSECURE_PLACEHOLDER"
+                - "--api.dashboard=true"
+                - "--entrypoints.web.address=:80"
+                - "--entrypoints.websecure.address=:443"
+                # ENTRYPOINT_DASHBOARD_PLACEHOLDER
+                - "--entrypoints.admin.address=:${AdminPort}"
+                - "--certificatesresolvers.letsencrypt.acme.email=${AdminEmail}"
+                - "--certificatesresolvers.letsencrypt.acme.storage=/etc/traefik/acme.json"
+                - "--certificatesresolvers.letsencrypt.acme.caserver=ACME_SERVER_PLACEHOLDER"
+                - "--certificatesresolvers.letsencrypt.acme.dnschallenge=true"
+                - "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=route53"
+                - "--certificatesresolvers.letsencrypt.acme.dnschallenge.delayBeforeCheck=0"
+                - "--providers.docker=true"
+                - "--providers.docker.network=localtunnel_net"
+                - "--providers.docker.exposedbydefault=false"
+                - "--log.level=INFO"
+              ports:
+                - "80:80"
+                - "443:443"
+                - "8080:8080"
+                - "${AdminPort}:${AdminPort}"
+              volumes:
+                - /var/run/docker.sock:/var/run/docker.sock:ro
+                - traefik-data:/etc/traefik
+              environment:
+                - AWS_HOSTED_ZONE_ID=${HostedZoneId}
+                - AWS_REGION=${AWS::Region}
+                - AWS_SDK_LOAD_CONFIG=true
+              labels:
+                - "traefik.enable=true"
+                # DASHBOARD_LABELS_PLACEHOLDER
+            localtunnel:
+              image: ghcr.io/ericchaves/localtunnel-server:${LocaltunnelImageTag}
+              container_name: localtunnel-server
+              restart: unless-stopped
+              networks:
+                - localtunnel_net
+              ports:
+                - "${PortRangeStart}-${PortRangeEnd}:${PortRangeStart}-${PortRangeEnd}"
+              environment:
+                - DEBUG=localtunnel*
+                - LT_PORT=${LocaltunnelPort}
+                - LT_DOMAIN=${ServiceName}.${DomainName}
+                - LT_ADMIN_PORT=${AdminPort}
+                - LT_PORT_RANGE_START=${PortRangeStart}
+                - LT_PORT_RANGE_END=${PortRangeEnd}
+                - LT_MAX_SOCKETS=${MaxSockets}
+                - LT_HTTP_PROXY_PORT=80
+                - LT_HTTPS_PROXY_PORT=443
+                - LT_SECURE=${SecureTraffic}
+                - LT_GRACE_PERIOD=${GracePeriod}
+                - LT_MAX_GRACE_PERIOD=${MaxGracePeriod}
+                - LT_IP_VALIDATION_STRICT=${IPValidationStrict}
+                - LT_TRUST_PROXY=${TrustProxy}
+                - LT_REQUEST_TIMEOUT=${RequestTimeout}
+                - LT_WEBSOCKET_TIMEOUT=${WebSocketTimeout}
+                - LT_RETRY_AFTER=${RetryAfter}
+                - LT_SOCKET_CHECK_INTERVAL=${SocketCheckInterval}
+                - LT_HMAC_SECRET=${HmacSecret}
+                - LT_HMAC_TIMESTAMP_TOLERANCE=${HmacTimestampTolerance}
+                - LT_HMAC_NONCE_THRESHOLD=${HmacNonceThreshold}
+                - LT_HMAC_NONCE_CACHE_TTL=${HmacNonceCacheTTL}
+                - LT_NONCE_CLEANUP_INTERVAL=${NonceCleanupInterval}
+              labels:
+                - "traefik.enable=true"
+                # Admin API (port ${AdminPort})
+                - "traefik.http.routers.localtunnel-admin.rule=Host(`DOMAIN_PLACEHOLDER`)"
+                - "traefik.http.routers.localtunnel-admin.entrypoints=admin"
+                - "traefik.http.routers.localtunnel-admin.service=localtunnel-admin"
+                - "traefik.http.services.localtunnel-admin.loadbalancer.server.port=${AdminPort}"
+                # Public server (port 80/443)
+                - "traefik.http.routers.localtunnel-public-http.rule=HostRegexp(`^[a-zA-Z0-9-]+[.]DOMAIN_PLACEHOLDER$`)"
+                - "traefik.http.routers.localtunnel-public-http.entrypoints=web"
+                - "traefik.http.routers.localtunnel-public-http.service=localtunnel-public"
+                - "traefik.http.routers.localtunnel-public-http.priority=10"
+                - "traefik.http.services.localtunnel-public.loadbalancer.server.port=${LocaltunnelPort}"
+                # HTTPS labels placeholder
+                - "# HTTPS_LABELS_PLACEHOLDER"
+          networks:
+            localtunnel_net:
+              name: localtunnel_net
+          volumes:
+            traefik-data:
+          COMPOSE_EOF
+
+          # Configure Traefik Dashboard based on LetsEncryptEnvironment
+          if [ "${LetsEncryptEnvironment}" = "production" ]; then
+            # Production: Add entrypoint dashboard for HTTPS access
+            sed -i '/# ENTRYPOINT_DASHBOARD_PLACEHOLDER/c\      - "--entrypoints.dashboard.address=:8080"' docker-compose.yml
+
+            # Production: Add HTTPS labels for dashboard
+            sed -i '/# DASHBOARD_LABELS_PLACEHOLDER/c\      - "traefik.http.routers.traefik-dashboard.rule=PathPrefix(`/dashboard`) || PathPrefix(`/api`)"\n      - "traefik.http.routers.traefik-dashboard.entrypoints=dashboard"\n      - "traefik.http.routers.traefik-dashboard.tls.certresolver=letsencrypt"\n      - "traefik.http.routers.traefik-dashboard.service=api@internal"' docker-compose.yml
+          else
+            # Staging: Remove placeholders (api.insecure already exposes dashboard on port 8080)
+            sed -i '/# ENTRYPOINT_DASHBOARD_PLACEHOLDER/d' docker-compose.yml
+            sed -i '/# DASHBOARD_LABELS_PLACEHOLDER/d' docker-compose.yml
+          fi
+
+          # Conditionally replace HTTPS_LABELS_PLACEHOLDER with HTTPS-related labels if SecureTraffic is true
+          if [ "${SecureTraffic}" = "true" ]; then
+            sed -i '/# HTTPS_LABELS_PLACEHOLDER/c\      - "traefik.http.routers.localtunnel-admin.tls.certresolver=letsencrypt"\n      - "traefik.http.routers.localtunnel-admin.tls=true"\n      - "traefik.http.routers.localtunnel-public-http.middlewares=https-redirect"\n      - "traefik.http.routers.localtunnel-public.rule=HostRegexp(`^[a-zA-Z0-9-]+[.]DOMAIN_PLACEHOLDER$`)"\n      - "traefik.http.routers.localtunnel-public.entrypoints=websecure"\n      - "traefik.http.routers.localtunnel-public.service=localtunnel-public"\n      - "traefik.http.routers.localtunnel-public.tls.certresolver=letsencrypt"\n      - "traefik.http.routers.localtunnel-public.tls.domains[0].main=DOMAIN_PLACEHOLDER"\n      - "traefik.http.routers.localtunnel-public.tls.domains[0].sans=*.DOMAIN_PLACEHOLDER"\n      - "traefik.http.routers.localtunnel-public.priority=10"\n      - "traefik.http.middlewares.https-redirect.redirectscheme.scheme=https"\n      - "traefik.http.middlewares.https-redirect.redirectscheme.permanent=true"' docker-compose.yml
+          fi
+
+          # Replace placeholders with actual values
+          sed -i "s/API_INSECURE_PLACEHOLDER/$API_INSECURE/g" docker-compose.yml
+          sed -i "s|ACME_SERVER_PLACEHOLDER|$ACME_SERVER|g" docker-compose.yml
+          sed -i "s/DOMAIN_PLACEHOLDER/$CUSTOM_DOMAIN/g" docker-compose.yml
+
+          # Pull Docker images and start containers
+          docker pull traefik:v3.5.3
+          docker pull ghcr.io/ericchaves/localtunnel-server:${LocaltunnelImageTag}
+          docker-compose up -d
+          sleep 60
+
+          # Signal CloudFormation
+          if docker ps | grep -q "traefik" && docker ps | grep -q "localtunnel-server"; then
+            /opt/aws/bin/cfn-signal -e 0 --stack ${AWS::StackName} --resource LocaltunnelInstance --region ${AWS::Region}
+          else
+            /opt/aws/bin/cfn-signal -e 1 --stack ${AWS::StackName} --resource LocaltunnelInstance --region ${AWS::Region}
+            exit 1
+          fi
+
+          echo "done"
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-localtunnel-instance'
+
+  LocaltunnelDNSRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: ShouldCreateInstance
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub '${ServiceName}.${DomainName}'
+      Type: A
+      TTL: 300
+      ResourceRecords:
+        - !GetAtt LocaltunnelInstance.PublicIp
+    DependsOn: LocaltunnelInstance
+
+  LocaltunnelWildcardDNSRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: ShouldCreateInstance
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub '*.${ServiceName}.${DomainName}'
+      Type: A
+      TTL: 300
+      ResourceRecords:
+        - !GetAtt LocaltunnelInstance.PublicIp
+    DependsOn: LocaltunnelInstance
+
+Outputs:
+  InstanceId:
+    Condition: ShouldCreateInstance
+    Description: EC2 Instance ID
+    Value: !Ref LocaltunnelInstance
+    Export:
+      Name: !Sub '${AWS::StackName}-InstanceId'
+  
+  PublicIp:
+    Condition: ShouldCreateInstance
+    Description: Public IP Address
+    Value: !GetAtt LocaltunnelInstance.PublicIp
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicIp'
+  
+  PublicDnsName:
+    Condition: ShouldCreateInstance
+    Description: Public DNS Name
+    Value: !GetAtt LocaltunnelInstance.PublicDnsName
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicDnsName'
+  
+  
+  LocaltunnelDomain:
+    Description: Localtunnel Custom Domain
+    Value: !Sub '${ServiceName}.${DomainName}'
+    Export:
+      Name: !Sub '${AWS::StackName}-LocaltunnelDomain'
+  
+  LocaltunnelWildcardDomain:
+    Description: Wildcard domain for public localtunnel subdomains (unrestricted)
+    Value: !Sub '*.${ServiceName}.${DomainName}'
+    Export:
+      Name: !Sub '${AWS::StackName}-LocaltunnelWildcardDomain'
+  
+  AdminApiUrl:
+    Description: Admin API URL for tunnel management (restricted by Security Group)
+    Value: !If
+      - IsSecureTraffic
+      - !Sub 'https://${ServiceName}.${DomainName}:${AdminPort}'
+      - !Sub 'http://${ServiceName}.${DomainName}:${AdminPort}'
+    Export:
+      Name: !Sub '${AWS::StackName}-AdminApiUrl'
+
+  ClientPortRange:
+    Description: TCP port range for client tunnel connections
+    Value: !Sub '${PortRangeStart}-${PortRangeEnd}'
+    Export:
+      Name: !Sub '${AWS::StackName}-ClientPortRange'
+
+  TraefikDashboard:
+    Description: Traefik Dashboard URL (restricted by Security Group)
+    Value: !If
+      - LetsEncryptEnvironmentIsProduction
+      - !Sub 'https://${ServiceName}.${DomainName}:8080/dashboard/'
+      - 'Access via EC2 IP: http://<EC2-IP>:8080/dashboard/ (see TraefikDashboardNote output for actual IP)'
+    Export:
+      Name: !Sub '${AWS::StackName}-TraefikDashboard'
+
+  TraefikDashboardNote:
+    Condition: ShouldCreateInstance
+    Description: Dashboard access instructions based on SSL environment
+    Value: !If
+      - LetsEncryptEnvironmentIsProduction
+      - !Sub 'Dashboard accessible via domain with HTTPS: https://${ServiceName}.${DomainName}:8080/dashboard/'
+      - !Sub 'Dashboard accessible via IP only (HTTP): http://${LocaltunnelInstance.PublicIp}:8080/dashboard/ - .dev domains enforce HTTPS, use IP for staging'
+    Export:
+      Name: !Sub '${AWS::StackName}-TraefikDashboardNote'
+
+  LocaltunnelClientCommand:
+    Description: Command to run localtunnel client from allowed IPs
+    Value: !If
+      - IsSecureTraffic
+      - !Sub 'npx localtunnel --host https://${ServiceName}.${DomainName}:${AdminPort} --port YOUR_LOCAL_PORT'
+      - !Sub 'npx localtunnel --host http://${ServiceName}.${DomainName}:${AdminPort} --port YOUR_LOCAL_PORT'
+    Export:
+      Name: !Sub '${AWS::StackName}-LocaltunnelClientCommand'
+  
+  ExamplePublicSubdomain:
+    Description: Example of a public subdomain (accessible from anywhere)
+    Value: !If
+      - IsSecureTraffic
+      - !Sub 'https://myapp.${ServiceName}.${DomainName}'
+      - !Sub 'http://myapp.${ServiceName}.${DomainName}'
+    Export:
+      Name: !Sub '${AWS::StackName}-ExamplePublicSubdomain'
+  
+  SecurityNote:
+    Description: Security configuration details
+    Value: !If
+      - LetsEncryptEnvironmentIsProduction
+      - !Sub 'Ports 8080 (Traefik dashboard HTTPS), ${AdminPort} (admin API) and ${PortRangeStart}-${PortRangeEnd} (client tunnels TCP) initially restricted to 127.0.0.1/32. Update Security Group "${AWS::StackName}-lt-client-sg" manually to allow your IPs. Ports 80/443 open for wildcard subdomains only.'
+      - !Sub 'Ports 8080 (Traefik dashboard HTTP via IP only), ${AdminPort} (admin API) and ${PortRangeStart}-${PortRangeEnd} (client tunnels TCP) initially restricted to 127.0.0.1/32. Update Security Group "${AWS::StackName}-lt-client-sg" manually to allow your IPs. Ports 80/443 open for wildcard subdomains only. Dashboard must be accessed via EC2 IP in staging.'
+    Export:
+      Name: !Sub '${AWS::StackName}-SecurityNote'
+  
+  SecurityGroupId:
+    Description: Security Group ID for client access - Update ingress rules manually to allow your IPs
+    Value: !Ref LocaltunnelClientSecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-SecurityGroupId'
+  
+  SecurityGroupName:
+    Description: Security Group Name for easy identification in AWS Console
+    Value: !Sub '${AWS::StackName}-lt-client-sg'
+    Export:
+      Name: !Sub '${AWS::StackName}-SecurityGroupName'
+  
+  SSLInfo:
+    Description: SSL Certificate Information
+    Value: !If
+      - LetsEncryptEnvironmentIsProduction
+      - 'Wildcard SSL enabled via DNS-01 challenge for public subdomains, admin API, and dashboard (all use HTTPS)'
+      - 'Wildcard SSL enabled via DNS-01 challenge for public subdomains and admin API (dashboard uses HTTP via IP only in staging)'
+    Export:
+      Name: !Sub '${AWS::StackName}-SSLInfo'
+  
+  LetsEncryptEnvironment:
+    Description: Lets Encrypt environment being used
+    Value: !Ref LetsEncryptEnvironment
+    Export:
+      Name: !Sub '${AWS::StackName}-LetsEncryptEnvironment'
+  
+  ChallengeType:
+    Description: ACME challenge type being used
+    Value: DNS-01 with Route53
+    Export:
+      Name: !Sub '${AWS::StackName}-ChallengeType'
+  
+  ProvisioningStatus:
+    Condition: ShouldCreateInstance
+    Description: Instance provisioning completed successfully
+    Value: SUCCESS - All services running with wildcard SSL, client IP restrictions, and secure dashboard
+    Export:
+      Name: !Sub '${AWS::StackName}-ProvisioningStatus'
+
+  HmacAuthenticationStatus:
+    Description: HMAC Authentication status
+    Value: !If
+      - HmacEnabled
+      - 'ENABLED - HMAC-SHA256 authentication required for tunnel creation'
+      - 'DISABLED - No HMAC authentication (backward compatible mode)'
+    Export:
+      Name: !Sub '${AWS::StackName}-HmacAuthenticationStatus'
+
+  HmacSecurityNote:
+    Description: HMAC Authentication security information
+    Value: !If
+      - HmacEnabled
+      - !Sub 'HMAC enabled with timestamp tolerance ${HmacTimestampTolerance}s, nonce threshold ${HmacNonceThreshold}s, cache TTL ${HmacNonceCacheTTL}s. Clients must send Authorization header (HMAC sha256=<signature>), X-Timestamp, and X-Nonce headers. See documentation for implementation details.'
+      - 'HMAC authentication disabled. To enable, set HmacSecret parameter (min 32 characters). X-LT-Client-Token header is supported for client identification without HMAC.'
+    Export:
+      Name: !Sub '${AWS::StackName}-HmacSecurityNote'
