@@ -10,6 +10,10 @@ import ClientManager from './lib/ClientManager.js';
 
 const debug = Debug('localtunnel:server');
 
+// Timeout Configuration
+const WEBSOCKET_TIMEOUT = parseInt(process.env.LT_WEBSOCKET_TIMEOUT || '10000', 10);
+debug('Timeout configuration: WEBSOCKET_TIMEOUT=%dms', WEBSOCKET_TIMEOUT);
+
 // Helper function to extract real client IP
 function getClientIP(req) {
     const trustProxy = process.env.LT_TRUST_PROXY === 'true';
@@ -23,6 +27,55 @@ function getClientIP(req) {
         // Direct connection - use socket
         return req.socket.remoteAddress;
     }
+}
+
+// Helper to wait for client to come online
+function waitForClientOnline(client, timeoutMs) {
+    return new Promise((resolve) => {
+        if (client.isOnline) {
+            resolve(true);
+            return;
+        }
+
+        const timeout = setTimeout(() => {
+            client.removeListener('online', onlineHandler);
+            resolve(false);
+        }, timeoutMs);
+
+        const onlineHandler = () => {
+            clearTimeout(timeout);
+            resolve(true);
+        };
+
+        client.once('online', onlineHandler);
+    });
+}
+
+// Helper to wait for socket to become available
+function waitForAvailableSocket(client, timeoutMs) {
+    return new Promise((resolve) => {
+        if (client.hasAvailableSockets()) {
+            resolve(true);
+            return;
+        }
+
+        const timeout = setTimeout(() => {
+            cleanup();
+            resolve(false);
+        }, timeoutMs);
+
+        const checkInterval = setInterval(() => {
+            if (client.hasAvailableSockets()) {
+                cleanup();
+                resolve(true);
+            }
+        }, 100); // Check every 100ms
+
+        const cleanup = () => {
+            clearTimeout(timeout);
+            clearInterval(checkInterval);
+        };
+    });
 }
 
 export default function(opt) {
@@ -201,6 +254,13 @@ export default function(opt) {
     const server = http.createServer();
 
     server.on('request', (req, res) => {
+        // do not log healthz to prevent flooding console logs
+        if (req.url === '/healthz') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'healthy' }));
+          return;
+        } 
+
         // without a hostname, we won't know who the request is for
         const hostname = req.headers.host;
         debug('Public server - Request: %s %s from %s, Host: %s', req.method, req.url, req.socket.remoteAddress, hostname);
@@ -223,20 +283,60 @@ export default function(opt) {
 
         debug('Public server - Routing to client: %s', clientId);
         const client = manager.getClient(clientId);
+
+        // CASE 1: Client does not exist
         if (!client) {
-            debug('Public server - Client not found: %s', clientId);
+            debug('Client not found: %s - Responding 404 Tunnel Not Found', clientId);
             res.statusCode = 404;
-            res.end('404');
+            res.statusMessage = 'Tunnel Not Found';
+            res.end();
             return;
         }
 
+        // CASE 2: Client exists but is offline (grace period)
+        if (!client.isOnline && client.graceTimeout) {
+            const remaining = Math.ceil(client.getGracePeriodRemaining() / 1000);
+            debug('Client %s offline (grace period: %ds remaining) - Responding 503 Service Temporarily Unavailable, Retry-After: %d',
+                  clientId, remaining, remaining);
+            res.statusCode = 503;
+            res.statusMessage = 'Service Temporarily Unavailable';
+            res.setHeader('Retry-After', remaining.toString());
+            res.end();
+            return;
+        }
+
+        // CASE 3: Client online but no sockets available
+        if (client.isOnline && !client.hasAvailableSockets()) {
+            debug('Client %s busy (0 available sockets) - Responding 503 Service Unavailable, Retry-After: 5', clientId);
+            res.statusCode = 503;
+            res.statusMessage = 'Service Unavailable';
+            res.setHeader('Retry-After', '5');
+            res.end();
+            return;
+        }
+
+        // CASE 4: Client online with sockets - process normally
         debug('Public server - Handling request for client: %s', clientId);
         client.handleRequest(req, res);
     });
 
-    server.on('upgrade', (req, socket, head) => {
+    server.on('upgrade', async (req, socket, head) => {
         const hostname = req.headers.host;
         debug('Public server - WebSocket upgrade request from %s, Host: %s', req.socket.remoteAddress, hostname);
+
+        // Helper to send HTTP response before upgrade
+        const respondAndClose = (statusCode, statusMessage, retryAfter = null) => {
+            const headers = [
+                `HTTP/1.1 ${statusCode} ${statusMessage}`,
+                'Connection: close',
+            ];
+            if (retryAfter) {
+                headers.push(`Retry-After: ${retryAfter}`);
+            }
+            headers.push('', '');
+            socket.write(headers.join('\r\n'));
+            socket.end();
+        };
 
         if (!hostname) {
             debug('Public server - WebSocket upgrade: Missing Host header, destroying socket');
@@ -253,12 +353,54 @@ export default function(opt) {
 
         debug('Public server - WebSocket upgrade: Routing to client: %s', clientId);
         const client = manager.getClient(clientId);
+
+        // CASE 5: Client does not exist
         if (!client) {
-            debug('Public server - WebSocket upgrade: Client not found: %s, destroying socket', clientId);
-            socket.destroy();
+            debug('WebSocket upgrade - Client not found: %s - Responding 404 Tunnel Not Found', clientId);
+            respondAndClose(404, 'Tunnel Not Found');
             return;
         }
 
+        // CASE 6: Client offline (grace period) - WAIT for reconnection
+        if (!client.isOnline && client.graceTimeout) {
+            const gracePeriodRemaining = client.getGracePeriodRemaining();
+            const waitTime = Math.min(WEBSOCKET_TIMEOUT, gracePeriodRemaining);
+
+            debug('WebSocket upgrade - Client %s offline, waiting up to %dms for reconnection', clientId, waitTime);
+
+            // Wait for client to come online
+            const reconnected = await waitForClientOnline(client, waitTime);
+
+            if (reconnected) {
+                debug('WebSocket upgrade - Client %s reconnected, proceeding with upgrade', clientId);
+                // Continue to normal processing below
+            } else {
+                const remaining = Math.ceil(client.getGracePeriodRemaining() / 1000);
+                debug('WebSocket upgrade - Client %s timeout (%dms), Responding 503 Service Temporarily Unavailable, Retry-After: %d',
+                      clientId, waitTime, remaining);
+                respondAndClose(503, 'Service Temporarily Unavailable', remaining.toString());
+                return;
+            }
+        }
+
+        // CASE 7: Client online but no sockets - WAIT for socket
+        if (client.isOnline && !client.hasAvailableSockets()) {
+            debug('WebSocket upgrade - Client %s has no available sockets, waiting up to %dms', clientId, WEBSOCKET_TIMEOUT);
+
+            const socketAvailable = await waitForAvailableSocket(client, WEBSOCKET_TIMEOUT);
+
+            if (socketAvailable) {
+                debug('WebSocket upgrade - Client %s socket available, proceeding with upgrade', clientId);
+                // Continue to normal processing below
+            } else {
+                debug('WebSocket upgrade - Client %s timeout (%dms), Responding 503 Service Unavailable, Retry-After: 5',
+                      clientId, WEBSOCKET_TIMEOUT);
+                respondAndClose(503, 'Service Unavailable', '5');
+                return;
+            }
+        }
+
+        // Process upgrade normally
         debug('Public server - WebSocket upgrade: Handling upgrade for client: %s', clientId);
         client.handleUpgrade(req, socket);
     });

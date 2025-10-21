@@ -131,6 +131,8 @@ This feature allows clients to:
 | `LT_MAX_GRACE_PERIOD` | 300000 (5min) | Maximum allowed grace period |
 | `LT_IP_VALIDATION_STRICT` | false | If true, returns 409 error on IP mismatch; if false, assigns random subdomain silently |
 | `LT_TRUST_PROXY` | false | If true, uses X-Forwarded-For header for IP detection (use behind reverse proxy) |
+| `LT_REQUEST_TIMEOUT` | 5000 (5s) | Timeout (ms) for HTTP requests when waiting for tunnel sockets |
+| `LT_WEBSOCKET_TIMEOUT` | 10000 (10s) | Timeout (ms) for WebSocket upgrades when waiting for tunnel reconnection |
 
 #### Behavior Examples
 

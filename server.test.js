@@ -297,4 +297,82 @@ describe('Server', () => {
 
         await new Promise(resolve => adminServer.close(resolve));
     });
+
+    describe('HTTP Response Codes', () => {
+        it('should return 404 Tunnel Not Found when client does not exist', async () => {
+            const { server, adminServer } = createServer({ domain: 'example.com' });
+            await new Promise(resolve => server.listen(resolve));
+            await new Promise(resolve => adminServer.listen(resolve));
+
+            const serverPort = server.address().port;
+
+            // Make request to non-existent subdomain
+            const reqOptions = {
+                hostname: 'localhost',
+                port: serverPort,
+                path: '/',
+                method: 'GET',
+                headers: {
+                    Host: 'nonexistent.example.com'
+                }
+            };
+
+            const res = await new Promise((resolve, reject) => {
+                const req = http.request(reqOptions, resolve);
+                req.on('error', reject);
+                req.end();
+            });
+
+            assert.equal(res.statusCode, 404);
+            assert.equal(res.statusMessage, 'Tunnel Not Found');
+
+            await new Promise(resolve => server.close(resolve));
+            await new Promise(resolve => adminServer.close(resolve));
+        });
+
+        it('should return 503 Service Temporarily Unavailable when client offline (grace period)', async function() {
+            this.timeout(10000);
+
+            const { server, adminServer } = createServer({ domain: 'example.com' });
+            await new Promise(resolve => server.listen(resolve));
+            await new Promise(resolve => adminServer.listen(resolve));
+
+            // Create client
+            const res1 = await makeRequest(adminServer, '/offline-test');
+            const clientPort = res1.body.port;
+
+            // Connect a TCP socket to make client go online
+            const clientSocket = net.connect(clientPort);
+            await new Promise(resolve => clientSocket.once('connect', resolve));
+
+            // Disconnect to trigger grace period
+            clientSocket.end();
+            await new Promise(resolve => setTimeout(resolve, 10)); // Wait briefly for offline event
+
+            // Make request to offline client (should be in grace period now)
+            const serverPort = server.address().port;
+            const reqOptions = {
+                hostname: 'localhost',
+                port: serverPort,
+                path: '/',
+                method: 'GET',
+                headers: {
+                    Host: 'offline-test.example.com'
+                }
+            };
+
+            const res = await new Promise((resolve, reject) => {
+                const req = http.request(reqOptions, resolve);
+                req.on('error', reject);
+                req.end();
+            });
+
+            assert.equal(res.statusCode, 503);
+            assert.equal(res.statusMessage, 'Service Temporarily Unavailable');
+            assert.ok(res.headers['retry-after']);
+
+            await new Promise(resolve => server.close(resolve));
+            await new Promise(resolve => adminServer.close(resolve));
+        });
+    });
 });

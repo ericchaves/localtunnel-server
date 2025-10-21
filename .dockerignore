@@ -1,2 +1,17 @@
 .git
 node_modules
+localtunnel.cfn.yml
+.env
+.vscode/
+.claude/
+.github/
+*.test.js
+*.md
+.travis.yml
+.gitignore
+.dockerignore
+.nvmrc
+.npmrc
+Dockerfile
+docker-compose.yml
+*.log
