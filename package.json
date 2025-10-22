@@ -34,7 +34,7 @@
     "ws": "^8.18.0"
   },
   "scripts": {
-    "test": "LT_MAX_GRACE_PERIOD=10000 LT_GRACE_PERIOD=100 mocha --check-leaks './**/*.test.js'",
+    "test": "LT_MAX_GRACE_PERIOD=10000 LT_GRACE_PERIOD=100 mocha --exit --check-leaks './**/*.test.js'",
     "start": "./bin/server",
     "dev": "node-dev bin/server --port 3000"
   }

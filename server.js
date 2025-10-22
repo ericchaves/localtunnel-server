@@ -8,11 +8,12 @@ import Router from 'koa-router';
 
 import ClientManager from './lib/ClientManager.js';
 
-const debug = Debug('localtunnel:server');
+const publicDebug = Debug('localtunnel:server:public');
+const adminDebug = Debug('localtunnel:server:admin');
 
 // Timeout Configuration
 const WEBSOCKET_TIMEOUT = parseInt(process.env.LT_WEBSOCKET_TIMEOUT || '10000', 10);
-debug('Timeout configuration: WEBSOCKET_TIMEOUT=%dms', WEBSOCKET_TIMEOUT);
+publicDebug('Timeout configuration: WEBSOCKET_TIMEOUT=%dms', WEBSOCKET_TIMEOUT);
 
 // Helper function to extract real client IP
 function getClientIP(req) {
@@ -110,7 +111,7 @@ export default function(opt) {
 
     const defaultPort = opt.secure ? 443 : 80;
 
-    debug('URL configuration: schema=%s, publicUrlPort=%d, defaultPort=%d',
+    adminDebug('URL configuration: schema=%s, publicUrlPort=%d, defaultPort=%d',
           schema, publicUrlPort, defaultPort);
 
     // Função para construir URL pública correta
@@ -126,7 +127,7 @@ export default function(opt) {
             url += ':' + publicUrlPort;
         }
 
-        debug('Built public URL: %s (tunnelId=%s, hostname=%s, port=%d)',
+        adminDebug('Built public URL: %s (tunnelId=%s, hostname=%s, port=%d)',
               url, tunnelId, hostname, publicUrlPort);
 
         return url;
@@ -138,21 +139,21 @@ export default function(opt) {
 
     // Admin API routes
     adminRouter.get('/api/status', async (ctx) => {
-        debug('GET /api/status - Request received');
+        adminDebug('GET /api/status - Request received');
         const stats = manager.stats;
         ctx.body = {
             tunnels: stats.tunnels,
             mem: process.memoryUsage(),
         };
-        debug('GET /api/status - Response: %d tunnels, %d MB memory', stats.tunnels, Math.round(process.memoryUsage().heapUsed / 1024 / 1024));
+        adminDebug('GET /api/status - Response: %d tunnels, %d MB memory', stats.tunnels, Math.round(process.memoryUsage().heapUsed / 1024 / 1024));
     });
 
     adminRouter.get('/api/tunnels/:id/status', async (ctx) => {
         const clientId = ctx.params.id;
-        debug('GET /api/tunnels/%s/status - Request received', clientId);
+        adminDebug('GET /api/tunnels/%s/status - Request received', clientId);
         const client = manager.getClient(clientId);
         if (!client) {
-            debug('GET /api/tunnels/%s/status - Client not found', clientId);
+            adminDebug('GET /api/tunnels/%s/status - Client not found', clientId);
             ctx.throw(404);
             return;
         }
@@ -161,17 +162,17 @@ export default function(opt) {
         ctx.body = {
             connected_sockets: stats.connectedSockets,
         };
-        debug('GET /api/tunnels/%s/status - Response: %d connected sockets', clientId, stats.connectedSockets);
+        adminDebug('GET /api/tunnels/%s/status - Response: %d connected sockets', clientId, stats.connectedSockets);
     });
 
     // root endpoint for tunnel creation
     adminRouter.get('/', async (ctx, next) => {
         const path = ctx.request.path;
-        debug('GET / - Request received from %s, path: %s', ctx.request.ip, path);
+        adminDebug('GET / - Request received from %s, path: %s', ctx.request.ip, path);
 
         // skip anything not on the root path
         if (path !== '/') {
-            debug('GET / - Path is not root, passing to next middleware');
+            adminDebug('GET / - Path is not root, passing to next middleware');
             await next();
             return;
         }
@@ -180,18 +181,18 @@ export default function(opt) {
         if (isNewClientRequest) {
             const reqId = hri.random();
             const clientIP = getClientIP(ctx.request);
-            debug('GET / - Making new client with random id: %s from IP: %s', reqId, clientIP);
+            adminDebug('GET / - Making new client with random id: %s from IP: %s', reqId, clientIP);
             const info = await manager.newClient(reqId, { ip: clientIP });
 
             const url = buildPublicUrl(info.id, ctx.request.host);
             info.url = url;
-            debug('GET / - New tunnel created: %s (port: %d)', url, info.port);
+            adminDebug('GET / - New tunnel created: %s (port: %d)', url, info.port);
             ctx.body = info;
             return;
         }
 
         // no new client request, send to landing page
-        debug('GET / - No new client request, redirecting to landing page: %s', landingPage);
+        adminDebug('GET / - No new client request, redirecting to landing page: %s', landingPage);
         ctx.redirect(landingPage);
     });
 
@@ -200,12 +201,12 @@ export default function(opt) {
     adminRouter.get('/:id', async (ctx) => {
         const reqId = ctx.params.id;
         const clientIP = getClientIP(ctx.request);
-        debug('GET /%s - Request received from %s (IP: %s) for custom subdomain', reqId, ctx.request.ip, clientIP);
+        adminDebug('GET /%s - Request received from %s (IP: %s) for custom subdomain', reqId, ctx.request.ip, clientIP);
 
         // limit requested hostnames to 63 characters
         if (! /^(?:[a-z0-9][a-z0-9\-]{4,63}[a-z0-9]|[a-z0-9]{4,63})$/.test(reqId)) {
             const msg = 'Invalid subdomain. Subdomains must be lowercase and between 4 and 63 alphanumeric characters.';
-            debug('GET /%s - Invalid subdomain format, rejecting request', reqId);
+            adminDebug('GET /%s - Invalid subdomain format, rejecting request', reqId);
             ctx.status = 403;
             ctx.body = {
                 message: msg,
@@ -213,20 +214,20 @@ export default function(opt) {
             return;
         }
 
-        debug('GET /%s - Making new client with custom id from IP: %s', reqId, clientIP);
+        adminDebug('GET /%s - Making new client with custom id from IP: %s', reqId, clientIP);
 
         try {
             const info = await manager.newClient(reqId, { ip: clientIP });
 
             const url = buildPublicUrl(info.id, ctx.request.host);
             info.url = url;
-            debug('GET /%s - Custom tunnel created: %s (port: %d)', reqId, url, info.port);
+            adminDebug('GET /%s - Custom tunnel created: %s (port: %d)', reqId, url, info.port);
             ctx.body = info;
             return;
         } catch (err) {
             // Handle IP mismatch error in strict mode
             if (err.message.includes('reserved by another client')) {
-                debug('GET /%s - Subdomain reserved for different IP', reqId);
+                adminDebug('GET /%s - Subdomain reserved for different IP', reqId);
                 ctx.status = 409;  // Conflict
                 ctx.body = {
                     message: err.message,
@@ -246,7 +247,7 @@ export default function(opt) {
 
     // Admin server only handles tunnel creation requests
     adminServer.on('request', (req, res) => {
-        debug('Admin server - Request: %s %s from %s', req.method, req.url, req.socket.remoteAddress);
+        adminDebug('Request: %s %s from %s', req.method, req.url, req.socket.remoteAddress);
         adminCallback(req, res);
     });
 
@@ -263,10 +264,10 @@ export default function(opt) {
 
         // without a hostname, we won't know who the request is for
         const hostname = req.headers.host;
-        debug('Public server - Request: %s %s from %s, Host: %s', req.method, req.url, req.socket.remoteAddress, hostname);
+        publicDebug('Request: %s %s from %s, Host: %s', req.method, req.url, req.socket.remoteAddress, hostname);
 
         if (!hostname) {
-            debug('Public server - Missing Host header, rejecting request');
+            publicDebug('Missing Host header, rejecting request');
             res.statusCode = 400;
             res.end('Host header is required');
             return;
@@ -276,17 +277,17 @@ export default function(opt) {
         if (!clientId) {
             // If no clientId, this might be an admin request on the main server
             // (when admin port is not specified separately)
-            debug('Public server - No clientId found, treating as admin request');
+            publicDebug('No clientId found, treating as admin request');
             adminCallback(req, res);
             return;
         }
 
-        debug('Public server - Routing to client: %s', clientId);
+        publicDebug('Routing to client: %s', clientId);
         const client = manager.getClient(clientId);
 
         // CASE 1: Client does not exist
         if (!client) {
-            debug('Client not found: %s - Responding 404 Tunnel Not Found', clientId);
+            publicDebug('Client not found: %s - Responding 404 Tunnel Not Found', clientId);
             res.statusCode = 404;
             res.statusMessage = 'Tunnel Not Found';
             res.end();
@@ -296,7 +297,7 @@ export default function(opt) {
         // CASE 2: Client exists but is offline (grace period)
         if (!client.isOnline && client.graceTimeout) {
             const remaining = Math.ceil(client.getGracePeriodRemaining() / 1000);
-            debug('Client %s offline (grace period: %ds remaining) - Responding 503 Service Temporarily Unavailable, Retry-After: %d',
+            publicDebug('Client %s offline (grace period: %ds remaining) - Responding 503 Service Temporarily Unavailable, Retry-After: %d',
                   clientId, remaining, remaining);
             res.statusCode = 503;
             res.statusMessage = 'Service Temporarily Unavailable';
@@ -307,7 +308,7 @@ export default function(opt) {
 
         // CASE 3: Client online but no sockets available
         if (client.isOnline && !client.hasAvailableSockets()) {
-            debug('Client %s busy (0 available sockets) - Responding 503 Service Unavailable, Retry-After: 5', clientId);
+            publicDebug('Client %s busy (0 available sockets) - Responding 503 Service Unavailable, Retry-After: 5', clientId);
             res.statusCode = 503;
             res.statusMessage = 'Service Unavailable';
             res.setHeader('Retry-After', '5');
@@ -316,13 +317,13 @@ export default function(opt) {
         }
 
         // CASE 4: Client online with sockets - process normally
-        debug('Public server - Handling request for client: %s', clientId);
+        publicDebug('Handling request for client: %s', clientId);
         client.handleRequest(req, res);
     });
 
     server.on('upgrade', async (req, socket, head) => {
         const hostname = req.headers.host;
-        debug('Public server - WebSocket upgrade request from %s, Host: %s', req.socket.remoteAddress, hostname);
+        publicDebug('WebSocket upgrade request from %s, Host: %s', req.socket.remoteAddress, hostname);
 
         // Helper to send HTTP response before upgrade
         const respondAndClose = (statusCode, statusMessage, retryAfter = null) => {
@@ -339,24 +340,24 @@ export default function(opt) {
         };
 
         if (!hostname) {
-            debug('Public server - WebSocket upgrade: Missing Host header, destroying socket');
+            publicDebug('WebSocket upgrade: Missing Host header, destroying socket');
             socket.destroy();
             return;
         }
 
         const clientId = GetClientIdFromHostname(hostname);
         if (!clientId) {
-            debug('Public server - WebSocket upgrade: No clientId found, destroying socket');
+            publicDebug('WebSocket upgrade: No clientId found, destroying socket');
             socket.destroy();
             return;
         }
 
-        debug('Public server - WebSocket upgrade: Routing to client: %s', clientId);
+        publicDebug('WebSocket upgrade: Routing to client: %s', clientId);
         const client = manager.getClient(clientId);
 
         // CASE 5: Client does not exist
         if (!client) {
-            debug('WebSocket upgrade - Client not found: %s - Responding 404 Tunnel Not Found', clientId);
+            publicDebug('WebSocket upgrade - Client not found: %s - Responding 404 Tunnel Not Found', clientId);
             respondAndClose(404, 'Tunnel Not Found');
             return;
         }
@@ -366,17 +367,17 @@ export default function(opt) {
             const gracePeriodRemaining = client.getGracePeriodRemaining();
             const waitTime = Math.min(WEBSOCKET_TIMEOUT, gracePeriodRemaining);
 
-            debug('WebSocket upgrade - Client %s offline, waiting up to %dms for reconnection', clientId, waitTime);
+            publicDebug('WebSocket upgrade - Client %s offline, waiting up to %dms for reconnection', clientId, waitTime);
 
             // Wait for client to come online
             const reconnected = await waitForClientOnline(client, waitTime);
 
             if (reconnected) {
-                debug('WebSocket upgrade - Client %s reconnected, proceeding with upgrade', clientId);
+                publicDebug('WebSocket upgrade - Client %s reconnected, proceeding with upgrade', clientId);
                 // Continue to normal processing below
             } else {
                 const remaining = Math.ceil(client.getGracePeriodRemaining() / 1000);
-                debug('WebSocket upgrade - Client %s timeout (%dms), Responding 503 Service Temporarily Unavailable, Retry-After: %d',
+                publicDebug('WebSocket upgrade - Client %s timeout (%dms), Responding 503 Service Temporarily Unavailable, Retry-After: %d',
                       clientId, waitTime, remaining);
                 respondAndClose(503, 'Service Temporarily Unavailable', remaining.toString());
                 return;
@@ -385,15 +386,15 @@ export default function(opt) {
 
         // CASE 7: Client online but no sockets - WAIT for socket
         if (client.isOnline && !client.hasAvailableSockets()) {
-            debug('WebSocket upgrade - Client %s has no available sockets, waiting up to %dms', clientId, WEBSOCKET_TIMEOUT);
+            publicDebug('WebSocket upgrade - Client %s has no available sockets, waiting up to %dms', clientId, WEBSOCKET_TIMEOUT);
 
             const socketAvailable = await waitForAvailableSocket(client, WEBSOCKET_TIMEOUT);
 
             if (socketAvailable) {
-                debug('WebSocket upgrade - Client %s socket available, proceeding with upgrade', clientId);
+                publicDebug('WebSocket upgrade - Client %s socket available, proceeding with upgrade', clientId);
                 // Continue to normal processing below
             } else {
-                debug('WebSocket upgrade - Client %s timeout (%dms), Responding 503 Service Unavailable, Retry-After: 5',
+                publicDebug('WebSocket upgrade - Client %s timeout (%dms), Responding 503 Service Unavailable, Retry-After: 5',
                       clientId, WEBSOCKET_TIMEOUT);
                 respondAndClose(503, 'Service Unavailable', '5');
                 return;
@@ -401,7 +402,7 @@ export default function(opt) {
         }
 
         // Process upgrade normally
-        debug('Public server - WebSocket upgrade: Handling upgrade for client: %s', clientId);
+        publicDebug('WebSocket upgrade: Handling upgrade for client: %s', clientId);
         client.handleUpgrade(req, socket);
     });
 
