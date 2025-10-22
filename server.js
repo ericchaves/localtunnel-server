@@ -1,4 +1,3 @@
-import log from 'book';
 import Koa from 'koa';
 import tldjs from 'tldjs';
 import Debug from 'debug';
@@ -28,6 +27,26 @@ function getClientIP(req) {
         // Direct connection - use socket
         return req.socket.remoteAddress;
     }
+}
+
+// Helper function to get complete socket information for logging
+// Always shows socket IP:port, and real IP from headers when available
+function getSocketInfo(req) {
+    const socketIP = req.socket.remoteAddress;
+    const socketPort = req.socket.remotePort;
+    const socketInfo = `${socketIP}:${socketPort}`;
+
+    // Check for proxy headers
+    const forwardedFor = req.headers['x-forwarded-for']?.split(',')[0]?.trim();
+    const realIP = req.headers['x-real-ip'];
+    const headerIP = forwardedFor || realIP;
+
+    // If there's a header IP and it's different from socket IP, show both
+    if (headerIP && headerIP !== socketIP) {
+        return `${socketInfo} (x-forwarded-for: ${headerIP})`;
+    }
+
+    return socketInfo;
 }
 
 // Helper to wait for client to come online
@@ -247,7 +266,7 @@ export default function(opt) {
 
     // Admin server only handles tunnel creation requests
     adminServer.on('request', (req, res) => {
-        adminDebug('Request: %s %s from %s', req.method, req.url, req.socket.remoteAddress);
+        adminDebug('Request: %s %s from %s', req.method, req.url, getSocketInfo(req));
         adminCallback(req, res);
     });
 
@@ -264,7 +283,7 @@ export default function(opt) {
 
         // without a hostname, we won't know who the request is for
         const hostname = req.headers.host;
-        publicDebug('Request: %s %s from %s, Host: %s', req.method, req.url, req.socket.remoteAddress, hostname);
+        publicDebug('Request: %s %s from %s, Host: %s', req.method, req.url, getSocketInfo(req), hostname);
 
         if (!hostname) {
             publicDebug('Missing Host header, rejecting request');
@@ -323,7 +342,7 @@ export default function(opt) {
 
     server.on('upgrade', async (req, socket, head) => {
         const hostname = req.headers.host;
-        publicDebug('WebSocket upgrade request from %s, Host: %s', req.socket.remoteAddress, hostname);
+        publicDebug('WebSocket upgrade request from %s, Host: %s', getSocketInfo(req), hostname);
 
         // Helper to send HTTP response before upgrade
         const respondAndClose = (statusCode, statusMessage, retryAfter = null) => {
